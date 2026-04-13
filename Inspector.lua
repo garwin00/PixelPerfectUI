@@ -97,14 +97,16 @@ local SKIP_NAMES = {
 
 local function IsSkippable(f)
     if not f then return true end
+    -- Guard: only real Frames have GetName. Textures, regions etc. don't.
+    if type(f.GetName) ~= "function" then return true end
     local name = f:GetName()
     if name and SKIP_NAMES[name] then return true end
     -- Ignore children of our own panel
     if _panel then
-        local p = f.GetParent and f:GetParent()
+        local p = type(f.GetParent) == "function" and f:GetParent()
         while p do
             if p == _panel then return true end
-            p = p.GetParent and p:GetParent()
+            p = type(p.GetParent) == "function" and p:GetParent()
         end
     end
     return false
