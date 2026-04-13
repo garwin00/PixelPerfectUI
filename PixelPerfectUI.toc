@@ -1,0 +1,11 @@
+## Interface: 110107
+## Title: |cff7ec8e3Pixel|r|cffffffffPerfect|r|cffaaaaaaUI|r
+## Notes: Pixel-perfect UI alignment for 4K and all resolutions. Bypasses WoW's 0.64 uiScale floor via direct UIParent:SetScale(). Full ElvUI integration.
+## Author:
+## Version: 1.0.0
+## SavedVariables: PixelPerfectUIDB
+
+Core.lua
+Alignment.lua
+Inspector.lua
+GUI.lua
