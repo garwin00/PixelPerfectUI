@@ -352,12 +352,14 @@ local function CreateGuideFrame(data)
 
     -- ── Drag logic (OnUpdate on guide frame only; handle delegates) ───────
     -- Snaps to nearest individual physical pixel.
+    -- _dragOffset: difference between cursor position and guide position at
+    -- the moment dragging begins, so the guide doesn't jump to cursor on click.
 
     f:SetScript("OnUpdate", function(self)
         if not self._dragging then return end
         local cx, cy = GetCursorPosition()
         local rawPx  = data.type == "H" and cy or cx
-        local px     = math.floor(rawPx + 0.5)   -- nearest single pixel
+        local px     = math.floor((rawPx - (self._dragOffset or 0)) + 0.5)
         if px ~= data.px then
             data.px = px
             PositionGuide(entry)
@@ -366,7 +368,10 @@ local function CreateGuideFrame(data)
 
     f:SetScript("OnMouseDown", function(self, btn)
         if btn == "LeftButton" then
-            self._dragging = true
+            local cx, cy = GetCursorPosition()
+            local rawPx  = data.type == "H" and cy or cx
+            self._dragOffset = rawPx - data.px
+            self._dragging   = true
             SetGuideHighlight(entry, true)
         end
     end)
@@ -389,7 +394,10 @@ local function CreateGuideFrame(data)
     -- Handle delegates drag state to guide frame (single OnUpdate)
     handle:SetScript("OnMouseDown", function(self, btn)
         if btn == "LeftButton" then
-            f._dragging = true
+            local cx, cy = GetCursorPosition()
+            local rawPx  = data.type == "H" and cy or cx
+            f._dragOffset = rawPx - data.px
+            f._dragging   = true
             SetGuideHighlight(entry, true)
         end
     end)

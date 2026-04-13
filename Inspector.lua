@@ -347,30 +347,26 @@ end
 -- INTERCEPT FRAME  (fullscreen overlay that captures mouse events)
 -- =============================================================================
 
--- Retrieve the real frame under the cursor, bypassing our intercept overlay.
--- The hide/show within one OnUpdate tick is invisible — WoW renders after
--- all scripts in a frame have completed.
+-- Retrieve the real frame under the cursor.
+-- GetMouseFoci() in WoW 12+ returns ALL hit-testable frames under the cursor
+-- across all strata/levels (not just the topmost). We skip our own overlay
+-- frames by name and return the first real frame.
 local function GetFocusedFrame()
-    _intercept:Hide()
-    local focused
     if GetMouseFoci then
-        -- GetMouseFoci() returns varargs, not a table — pack them first
         local foci = { GetMouseFoci() }
-        if #foci > 0 then
-            for _, f in ipairs(foci) do
-                if not IsSkippable(f) then
-                    focused = f
-                    break
-                end
+        for _, f in ipairs(foci) do
+            if not IsSkippable(f) then
+                return f
             end
         end
     end
-    if not focused and GetMouseFocus then
+    -- Legacy fallback (WoW < 10.0): only works if intercept is not present,
+    -- but we keep it as a last resort.
+    if GetMouseFocus then
         local f = GetMouseFocus()
-        if not IsSkippable(f) then focused = f end
+        if not IsSkippable(f) then return f end
     end
-    _intercept:Show()
-    return focused
+    return nil
 end
 
 local function CreateIntercept()
