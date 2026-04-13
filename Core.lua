@@ -189,13 +189,12 @@ end
 
 --- Apply the pixel-perfect scale.
 ---
---- When ElvUI is present (and hookElvUI is enabled) we use the COOPERATIVE
---- path: write the target scale into ElvUI's own database, then call
---- E:UpdateUIScale() so ElvUI applies it and recalculates E.mult in one shot.
---- No fighting, no 50ms delay, E.mult is always correct.
+--- Uses UIParent:SetScale() directly — the same mechanism Blizzard's own UI
+--- uses. Bypasses the 0.64 CVar floor that blocks sub-64% scales (needed at
+--- 1440p where the ideal scale is 0.5333).
 ---
---- When ElvUI is absent (or hookElvUI disabled) we call UIParent:SetScale()
---- directly, which bypasses the 0.64 CVar floor.
+--- ElvUI is left entirely alone. If anything resets our scale, the
+--- UIParent:SetScale hook installed at login will re-apply on the next frame.
 ---
 --- @param scale  number?   Defaults to auto pixel-perfect for this resolution
 function PPUI:ApplyScale(scale)
@@ -204,29 +203,12 @@ function PPUI:ApplyScale(scale)
                       or self:GetPixelPerfectScale())
 
     self._applying = true
-
-    local E = self:E()
-    local _, physH = self:GetPhysicalSize()
-
-    -- Always apply via SetScale() — direct and reliable.
-    -- The CVar has a 0.64 floor; SetScale() bypasses it (needed for 1440p etc).
     UIParent:SetScale(scale)
+    -- Keep the CVar in sync so Blizzard's UI Scale slider reflects reality.
     SetCVarSafe("useUiScale", "1")
     SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
 
-    -- If ElvUI is loaded, patch its cached scale values so its 1px border
-    -- calculations (E.mult) stay correct. We do this directly rather than
-    -- calling E:UpdateUIScale() which may not exist in all ElvUI versions.
-    if E then
-        E.uiScale = scale
-        E.mult    = 768 / (physH * scale)
-        if E.db and E.db.general then
-            E.db.general.uiScale = scale
-        end
-    end
-
-    -- Hold the flag long enough to absorb DISPLAY_SIZE_CHANGED and any
-    -- delayed ElvUI response to it. 0.5s covers even slow ElvUI init paths.
+    -- Hold the flag long enough to absorb DISPLAY_SIZE_CHANGED.
     C_Timer.After(0.5, function() self._applying = false end)
 
     if self.GUI and self.GUI:IsShown() then
@@ -247,35 +229,22 @@ function PPUI:ResetScale()
 end
 
 -- =============================================================================
--- ELVUI INTEGRATION
+-- SCALE DEFENCE HOOK
 -- =============================================================================
 
 --- Returns the ElvUI engine object (E), or nil if ElvUI is not loaded.
+--- Kept for diagnostics / GUI display only — we no longer call into ElvUI.
 function PPUI:E()
     return ElvUI and ElvUI[1] or nil
 end
 
 --- Returns a diagnostic snapshot of ElvUI's internal scale state.
---- Returns nil if ElvUI is not present.
 function PPUI:GetElvUIInfo()
     local E = self:E()
     if not E then return nil end
-
     local _, physH  = self:GetPhysicalSize()
     local curScale  = UIParent:GetScale()
-
-    -- E.mult is what ElvUI uses for all 1-pixel border/padding calculations.
-    -- It represents: how many region units = 1 physical pixel.
-    -- Formula: 1 pixel = 768 / (physH × curScale) region units.
-    --
-    -- At N=2 (4K with scale=0.7111):
-    --   idealMult = 768 / (2160 × 0.7111) = 768/1536 = 0.5
-    --   This means SetWidth(E.mult) draws a 1-pixel border = 0.5 units wide.
-    --   ElvUI's borders will look correct ONLY if E.mult = 0.5 here.
-    --   If ElvUI caches E.mult=1.0 (from before our scale change), borders
-    --   will be 2px wide instead of 1px — and components won't line up.
     local idealMult = 768 / (physH * curScale)
-
     return {
         uiScale   = E.uiScale or 0,
         mult      = E.mult    or 0,
@@ -285,67 +254,33 @@ function PPUI:GetElvUIInfo()
     }
 end
 
---- Hook UIParent:SetScale to defend against anything (ElvUI, other addons,
---- Blizzard) resetting the scale after we've applied it.
----
---- We hook UIParent directly rather than a specific ElvUI function — this is
---- version-proof and works regardless of what ElvUI calls internally.
---- When something tries to set a scale that differs from our target while we
---- are not the one applying, we schedule an immediate re-apply.
-function PPUI:HookElvUI()
-    local E = self:E()
-    if not E or self._elvuiHooked then return end
-
-    -- Patch E.db.general.uiScale so that whatever ElvUI function reads it
-    -- during its own init will see our target value.
-    local target = self.db.useManualScale
-        and self.db.manualScale or self:GetPixelPerfectScale()
-    if E.db and E.db.general then
-        E.db.general.uiScale = target
-    end
-
-    -- Hook UIParent:SetScale — fires whenever anyone changes UIParent scale.
-    -- If _applying is false and the new scale isn't our target, re-apply.
+--- Install a hook on UIParent:SetScale so that if anything (ElvUI, Blizzard,
+--- another addon) resets the scale we re-apply our target on the next frame.
+--- Called once at login; safe to call multiple times (guarded by _scaleHooked).
+function PPUI:InstallScaleHook()
+    if self._scaleHooked then return end
     hooksecurefunc(UIParent, "SetScale", function(_, newScale)
         if self._applying then return end
-        if not (self.db and self.db.enabled and self.db.hookElvUI) then return end
-
-        local t = self.db.useManualScale
+        if not (self.db and self.db.enabled) then return end
+        local target = self.db.useManualScale
             and self.db.manualScale or self:GetPixelPerfectScale()
-
-        if math.abs(newScale - t) > 0.000005 then
-            -- Use C_Timer.After(0) to defer until after the current call stack
-            -- fully unwinds — avoids calling ApplyScale inside SetScale.
-            C_Timer.After(0, function() self:ApplyScale(t) end)
+        if math.abs(newScale - target) > 0.000005 then
+            C_Timer.After(0, function() self:ApplyScale(target) end)
         end
     end)
-
-    self._elvuiHooked = true
-    self:Log("ElvUI detected — UIParent:SetScale hook active.")
-
-    -- Apply now that ElvUI is fully initialised.
-    if self.db.enabled and self.db.autoApply then
-        self:ApplyScale()
-    end
+    self._scaleHooked = true
 end
 
---- Force-reapply the pixel-perfect scale and resync ElvUI's internal state.
----
---- In normal operation this is not needed — ApplyScale() via the cooperative
---- path keeps E.uiScale and E.mult correct automatically. Use this as a
---- manual repair if ElvUI's borders look wrong after a /reload or addon update.
+--- Kept for slash command / GUI compatibility — now just re-applies scale.
 function PPUI:SyncElvUI()
-    local E = self:E()
-    if not E then
-        self:Log("|cffff4444ElvUI not detected.|r")
-        return
-    end
-
     self:ApplyScale()
-
-    self:Log(string.format(
-        "ElvUI synced → E.uiScale=%.6f  E.mult=%.6f",
-        E.uiScale or 0, E.mult or 0))
+    local E = self:E()
+    if E then
+        self:Log(string.format("Scale applied. ElvUI E.mult=%.4f (ideal=%.4f)",
+            E.mult or 0, 768 / (select(2, self:GetPhysicalSize()) * UIParent:GetScale())))
+    else
+        self:Log("Scale applied.")
+    end
 end
 
 -- =============================================================================
@@ -362,31 +297,24 @@ PPUI:SetScript("OnEvent", function(self, event, arg1)
         self.db                = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
 
     elseif event == "PLAYER_LOGIN" then
-        -- Ensure DB is loaded even if ADDON_LOADED fired without our name
         if not self.db then
-            PixelPerfectUIDB   = PixelPerfectUIDB or {}
-            self.db            = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
+            PixelPerfectUIDB = PixelPerfectUIDB or {}
+            self.db          = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
         end
 
-        if self.db.enabled and self.db.autoApply then
-            -- If ElvUI is present, delay until after ElvUI finishes its own
-            -- init sequence (hookElvUI fires at 0.8s and calls ApplyScale).
-            -- Without ElvUI, apply immediately after Blizzard's layout pass.
-            local hasElvUI = ElvUI ~= nil
-            if not hasElvUI or not self.db.hookElvUI then
-                C_Timer.After(0.1, function() self:ApplyScale() end)
-            end
-        end
+        -- Install scale defence hook once, before any apply.
+        self:InstallScaleHook()
 
-        -- Init alignment tools (guides, grid, center indicator) after UI settles
+        -- Init alignment tools after UI settles.
         C_Timer.After(0.3, function()
             if ns.AlignTools then ns.AlignTools:Init() end
         end)
 
-        -- ElvUI needs its own extra init time before the hook is reliable
-        C_Timer.After(0.8, function()
-            if self.db.hookElvUI then self:HookElvUI() end
-        end)
+        -- Apply scale after a delay so Blizzard and ElvUI both finish their
+        -- own login layout passes first. Our hook defends against resets.
+        if self.db.enabled and self.db.autoApply then
+            C_Timer.After(1.0, function() self:ApplyScale() end)
+        end
 
     elseif event == "DISPLAY_SIZE_CHANGED" then
         -- Guard: UIParent:SetScale() itself fires DISPLAY_SIZE_CHANGED, which
