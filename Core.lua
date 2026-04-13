@@ -225,9 +225,9 @@ function PPUI:ApplyScale(scale)
         end
     end
 
-    -- Hold the flag long enough to absorb the DISPLAY_SIZE_CHANGED event
-    -- that UIParent:SetScale() fires synchronously.
-    C_Timer.After(0.1, function() self._applying = false end)
+    -- Hold the flag long enough to absorb DISPLAY_SIZE_CHANGED and any
+    -- delayed ElvUI response to it. 0.5s covers even slow ElvUI init paths.
+    C_Timer.After(0.5, function() self._applying = false end)
 
     if self.GUI and self.GUI:IsShown() then
         self.GUI:Refresh()
@@ -285,37 +285,43 @@ function PPUI:GetElvUIInfo()
     }
 end
 
---- Register a cooperative hook on ElvUI's UpdateUIScale.
+--- Hook UIParent:SetScale to defend against anything (ElvUI, other addons,
+--- Blizzard) resetting the scale after we've applied it.
 ---
---- If something outside this addon triggers UpdateUIScale (e.g. ElvUI's own
---- init sequence, a reload, or another addon), we intercept it, correct
---- E.db.general.uiScale to our target, and call ApplyScale() so the result
---- is always pixel-perfect. The _applying guard prevents re-entrant loops.
+--- We hook UIParent directly rather than a specific ElvUI function — this is
+--- version-proof and works regardless of what ElvUI calls internally.
+--- When something tries to set a scale that differs from our target while we
+--- are not the one applying, we schedule an immediate re-apply.
 function PPUI:HookElvUI()
     local E = self:E()
     if not E or self._elvuiHooked then return end
 
-    -- Only hook if the method actually exists — it may be absent in some
-    -- ElvUI builds or forks.
-    if type(E.UpdateUIScale) == "function" then
-        hooksecurefunc(E, "UpdateUIScale", function()
-            -- We triggered this call ourselves — skip to avoid a loop.
-            if self._applying then return end
-            if not (self.db and self.db.enabled and self.db.hookElvUI) then return end
-
-            local target = self.db.useManualScale
-                and self.db.manualScale or self:GetPixelPerfectScale()
-
-            if math.abs(UIParent:GetScale() - target) > 0.000005 then
-                self:ApplyScale(target)
-            end
-        end)
-        self:Log("ElvUI hook active.")
-    else
-        self:Log("ElvUI detected — UpdateUIScale not found, skipping hook.")
+    -- Patch E.db.general.uiScale so that whatever ElvUI function reads it
+    -- during its own init will see our target value.
+    local target = self.db.useManualScale
+        and self.db.manualScale or self:GetPixelPerfectScale()
+    if E.db and E.db.general then
+        E.db.general.uiScale = target
     end
 
+    -- Hook UIParent:SetScale — fires whenever anyone changes UIParent scale.
+    -- If _applying is false and the new scale isn't our target, re-apply.
+    hooksecurefunc(UIParent, "SetScale", function(_, newScale)
+        if self._applying then return end
+        if not (self.db and self.db.enabled and self.db.hookElvUI) then return end
+
+        local t = self.db.useManualScale
+            and self.db.manualScale or self:GetPixelPerfectScale()
+
+        if math.abs(newScale - t) > 0.000005 then
+            -- Use C_Timer.After(0) to defer until after the current call stack
+            -- fully unwinds — avoids calling ApplyScale inside SetScale.
+            C_Timer.After(0, function() self:ApplyScale(t) end)
+        end
+    end)
+
     self._elvuiHooked = true
+    self:Log("ElvUI detected — UIParent:SetScale hook active.")
 
     -- Apply now that ElvUI is fully initialised.
     if self.db.enabled and self.db.autoApply then
