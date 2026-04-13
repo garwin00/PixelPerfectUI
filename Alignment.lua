@@ -64,12 +64,6 @@ local function PxToUnits(px)
     return (px * 768) / (scale * physH)
 end
 
--- Snap a pixel value to the nearest N-pixel boundary.
-local function SnapPx(px)
-    local N = PPUI:GetPixelMultiplier()
-    return math.floor(px / N + 0.5) * N
-end
-
 -- Ensure db sub-tables exist.
 local function EnsureDB()
     if not PPUI.db then return end   -- guard: called before PLAYER_LOGIN in edge cases
@@ -180,24 +174,51 @@ end
 -- =============================================================================
 -- GUIDE LINES
 -- =============================================================================
--- Guides are full-screen 1px lines (H or V) that snap to pixel boundaries.
--- Each guide has:
---   • A Frame (hit target, EnableMouse, drag handler)
---   • A thin colored texture drawn inside
---   • A label showing its pixel position (visible on hover)
+-- Each guide consists of two frames:
+--   1. Guide frame  — full-screen strip (hit target + 1px line texture)
+--   2. Handle badge — small pill anchored at the screen centre of the guide's
+--                     axis; shows pixel position + drag-direction arrow.
+--                     This is the primary visual affordance.
 --
+-- Dragging snaps to the nearest individual physical pixel (not N-boundaries).
 -- Persistence: guide pixel positions are stored in PPUI.db.guides.
 
-local GUIDE_COLOR = { 1.0, 0.55, 0.10, 0.90 }   -- orange
-local GUIDE_LOCKED_COLOR = { 0.49, 0.78, 0.89, 0.90 }  -- cyan when snapped
+local GUIDE_COL     = { 1.00, 0.55, 0.10, 0.90 }   -- orange
+local GUIDE_COL_HOV = { 1.00, 0.75, 0.30, 1.00 }   -- brighter orange on hover
+
+-- Handle badge dimensions (region units).
+-- At 4K/scale=0.7111: 1 unit ≈ 2px, so these are ~100×22 physical pixels.
+local HANDLE_LONG = 52
+local HANDLE_THIN = 11
+
+local function SetGuideHighlight(entry, on)
+    local c = on and GUIDE_COL_HOV or GUIDE_COL
+    if entry.lineTex then
+        entry.lineTex:SetColorTexture(c[1], c[2], c[3], c[4])
+    end
+    if entry.handle then
+        entry.handle:SetBackdropBorderColor(c[1], c[2], c[3], on and 1.0 or 0.85)
+        entry.handle:SetBackdropColor(0.05, 0.05, 0.07, on and 0.97 or 0.88)
+    end
+end
 
 local function RemoveGuideFrame(entry)
     if entry.frame then
-        entry.frame:Hide()
-        entry.frame:SetScript("OnUpdate", nil)
+        entry.frame:SetScript("OnUpdate",    nil)
         entry.frame:SetScript("OnMouseDown", nil)
-        entry.frame:SetScript("OnMouseUp", nil)
+        entry.frame:SetScript("OnMouseUp",   nil)
+        entry.frame:SetScript("OnEnter",     nil)
+        entry.frame:SetScript("OnLeave",     nil)
+        entry.frame:Hide()
         entry.frame:SetParent(nil)
+    end
+    if entry.handle then
+        entry.handle:SetScript("OnMouseDown", nil)
+        entry.handle:SetScript("OnMouseUp",   nil)
+        entry.handle:SetScript("OnEnter",     nil)
+        entry.handle:SetScript("OnLeave",     nil)
+        entry.handle:Hide()
+        entry.handle:SetParent(nil)
     end
 end
 
@@ -228,98 +249,164 @@ end
 
 local function PositionGuide(entry)
     local data  = entry.data
-    local f     = entry.frame
     local units = PxToUnits(data.px)
-    f:ClearAllPoints()
+
+    -- Guide line frame (full-screen strip)
+    entry.frame:ClearAllPoints()
     if data.type == "H" then
-        -- Full-width horizontal strip
-        f:SetPoint("BOTTOMLEFT",  UIParent, "BOTTOMLEFT",  0, units - 1)
-        f:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", 0, units - 1)
-        f:SetHeight(3)   -- 3-unit hit target centred on the 1px line
+        entry.frame:SetPoint("BOTTOMLEFT",  UIParent, "BOTTOMLEFT",  0, units - 1)
+        entry.frame:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", 0, units - 1)
+        entry.frame:SetHeight(3)
     else
-        -- Full-height vertical strip
-        f:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", units - 1, 0)
-        f:SetPoint("TOPLEFT",    UIParent, "TOPLEFT",    units - 1, 0)
-        f:SetWidth(3)
+        entry.frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", units - 1, 0)
+        entry.frame:SetPoint("TOPLEFT",    UIParent, "TOPLEFT",    units - 1, 0)
+        entry.frame:SetWidth(3)
     end
-    if entry.label then
-        local snapped = (data.px == SnapPx(data.px))
-        local col = snapped and GUIDE_LOCKED_COLOR or GUIDE_COLOR
-        entry.label:SetTextColor(col[1], col[2], col[3], 1)
-        entry.label:SetText(data.type .. ": " .. data.px .. "px"
-            .. (snapped and "  ✓" or ""))
+
+    -- Handle badge: sits on the guide, centred on the perpendicular axis
+    if entry.handle then
+        entry.handle:ClearAllPoints()
+        if data.type == "H" then
+            entry.handle:SetPoint("CENTER", UIParent, "BOTTOMLEFT",
+                UIParent:GetWidth() / 2, units)
+        else
+            entry.handle:SetPoint("CENTER", UIParent, "BOTTOMLEFT",
+                units, UIParent:GetHeight() / 2)
+        end
     end
-    if entry.lineTex then
-        entry.lineTex:SetColorTexture(
-            GUIDE_COLOR[1], GUIDE_COLOR[2], GUIDE_COLOR[3], GUIDE_COLOR[4])
+
+    -- Update position label in handle
+    if entry.handleLbl then
+        entry.handleLbl:SetText(data.px .. " px")
     end
 end
 
 local function CreateGuideFrame(data)
+    -- ── 1. Full-screen guide line + hit area ─────────────────────────────
     local f = CreateFrame("Frame", nil, UIParent)
     f:SetFrameStrata("HIGH")
     f:SetFrameLevel(90)
     f:EnableMouse(true)
 
-    -- Thin colored line texture (1px thick, centered in the hit frame)
-    local tex = f:CreateTexture(nil, "OVERLAY")
+    local lineTex = f:CreateTexture(nil, "OVERLAY")
     if data.type == "H" then
-        tex:SetHeight(1)
-        tex:SetPoint("LEFT",  f, "LEFT",  0, 0)
-        tex:SetPoint("RIGHT", f, "RIGHT", 0, 0)
+        lineTex:SetHeight(1)
+        lineTex:SetPoint("LEFT",  f, "LEFT",  0, 0)
+        lineTex:SetPoint("RIGHT", f, "RIGHT", 0, 0)
     else
-        tex:SetWidth(1)
-        tex:SetPoint("TOP",    f, "TOP",    0, 0)
-        tex:SetPoint("BOTTOM", f, "BOTTOM", 0, 0)
+        lineTex:SetWidth(1)
+        lineTex:SetPoint("TOP",    f, "TOP",    0, 0)
+        lineTex:SetPoint("BOTTOM", f, "BOTTOM", 0, 0)
     end
-    tex:SetColorTexture(GUIDE_COLOR[1], GUIDE_COLOR[2], GUIDE_COLOR[3], GUIDE_COLOR[4])
+    lineTex:SetColorTexture(GUIDE_COL[1], GUIDE_COL[2], GUIDE_COL[3], GUIDE_COL[4])
 
-    -- Position label (shows on hover, always slightly offset from the line)
-    local lbl = f:CreateFontString(nil, "OVERLAY")
-    lbl:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
-    lbl:SetTextColor(1, 0.9, 0.6, 1)
-    lbl:SetAlpha(0)   -- hidden until hover
+    -- ── 2. Handle badge (grab handle, centred on screen) ─────────────────
+    local handle = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+    handle:SetFrameStrata("HIGH")
+    handle:SetFrameLevel(95)   -- above guide line
+    handle:EnableMouse(true)
+
     if data.type == "H" then
-        lbl:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 4, 2)
+        handle:SetSize(HANDLE_LONG, HANDLE_THIN)
     else
-        lbl:SetPoint("BOTTOMLEFT", f, "BOTTOMRIGHT", 2, 4)
+        handle:SetSize(HANDLE_THIN, HANDLE_LONG)
     end
 
-    local entry = { data = data, frame = f, lineTex = tex, label = lbl }
+    handle:SetBackdrop({
+        bgFile   = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+    })
+    handle:SetBackdropColor(0.05, 0.05, 0.07, 0.88)
+    handle:SetBackdropBorderColor(GUIDE_COL[1], GUIDE_COL[2], GUIDE_COL[3], 0.85)
 
-    f:SetScript("OnEnter", function() lbl:SetAlpha(1) end)
-    f:SetScript("OnLeave", function() lbl:SetAlpha(0) end)
+    -- Drag-direction arrow
+    local arrowFS = handle:CreateFontString(nil, "OVERLAY")
+    arrowFS:SetFont("Fonts\\FRIZQT__.TTF", 8, "OUTLINE")
+    arrowFS:SetTextColor(T.accent[1], T.accent[2], T.accent[3], 0.90)
+
+    -- Pixel position label
+    local lblFS = handle:CreateFontString(nil, "OVERLAY")
+    lblFS:SetFont("Fonts\\FRIZQT__.TTF", 8, "OUTLINE")
+    lblFS:SetTextColor(1, 0.85, 0.45, 1)
+
+    if data.type == "H" then
+        -- Horizontal guide: handle is wide, items sit side by side
+        arrowFS:SetPoint("LEFT", handle, "LEFT", 3, 0)
+        arrowFS:SetText("↕")
+        lblFS:SetPoint("LEFT",   arrowFS, "RIGHT", 3, 0)
+    else
+        -- Vertical guide: handle is tall, items stack vertically
+        arrowFS:SetPoint("TOP",  handle, "TOP",  0, -2)
+        arrowFS:SetText("↔")
+        lblFS:SetPoint("TOP",    arrowFS, "BOTTOM", 0, -1)
+    end
+
+    local entry = {
+        data      = data,
+        frame     = f,
+        lineTex   = lineTex,
+        handle    = handle,
+        handleLbl = lblFS,
+    }
+
+    -- ── Drag logic (OnUpdate on guide frame only; handle delegates) ───────
+    -- Snaps to nearest individual physical pixel.
+
+    f:SetScript("OnUpdate", function(self)
+        if not self._dragging then return end
+        local cx, cy = GetCursorPosition()
+        local rawPx  = data.type == "H" and cy or cx
+        local px     = math.floor(rawPx + 0.5)   -- nearest single pixel
+        if px ~= data.px then
+            data.px = px
+            PositionGuide(entry)
+        end
+    end)
 
     f:SetScript("OnMouseDown", function(self, btn)
         if btn == "LeftButton" then
-            -- Cache N once at drag start; it won't change while dragging
-            self._snapN  = PPUI:GetPixelMultiplier()
             self._dragging = true
+            SetGuideHighlight(entry, true)
         end
     end)
 
     f:SetScript("OnMouseUp", function(self, btn)
         if btn == "LeftButton" then
             self._dragging = false
-            self._snapN    = nil
-            data.px = self._currentPx or data.px
+            SetGuideHighlight(entry, not f._dragging)
             AlignTools:SaveGuides()
         elseif btn == "RightButton" then
             AlignTools:RemoveGuide(self)
         end
     end)
 
-    f:SetScript("OnUpdate", function(self)
-        if not self._dragging then return end
-        local cx, cy = GetCursorPosition()
-        local rawPx = data.type == "H" and cy or cx
-        local N     = self._snapN or 1
-        local px    = math.floor(rawPx / N + 0.5) * N
-        if px ~= data.px then
-            data.px         = px
-            self._currentPx = px
-            PositionGuide(entry)
+    f:SetScript("OnEnter", function() SetGuideHighlight(entry, true) end)
+    f:SetScript("OnLeave", function()
+        if not f._dragging then SetGuideHighlight(entry, false) end
+    end)
+
+    -- Handle delegates drag state to guide frame (single OnUpdate)
+    handle:SetScript("OnMouseDown", function(self, btn)
+        if btn == "LeftButton" then
+            f._dragging = true
+            SetGuideHighlight(entry, true)
         end
+    end)
+
+    handle:SetScript("OnMouseUp", function(self, btn)
+        if btn == "LeftButton" then
+            f._dragging = false
+            SetGuideHighlight(entry, false)
+            AlignTools:SaveGuides()
+        elseif btn == "RightButton" then
+            AlignTools:RemoveGuide(f)
+        end
+    end)
+
+    handle:SetScript("OnEnter", function() SetGuideHighlight(entry, true) end)
+    handle:SetScript("OnLeave", function()
+        if not f._dragging then SetGuideHighlight(entry, false) end
     end)
 
     PositionGuide(entry)
@@ -330,10 +417,9 @@ function AlignTools:AddHGuide(px)
     EnsureDB()
     if not px then
         local _, cy = GetCursorPosition()
-        px = SnapPx(math.floor(cy + 0.5))
+        px = math.floor(cy + 0.5)
     end
-    local data  = { type = "H", px = px }
-    local entry = CreateGuideFrame(data)
+    local entry = CreateGuideFrame({ type = "H", px = px })
     _guideFrames[#_guideFrames + 1] = entry
     AlignTools:SaveGuides()
     return entry
@@ -343,10 +429,9 @@ function AlignTools:AddVGuide(px)
     EnsureDB()
     if not px then
         local cx = GetCursorPosition()
-        px = SnapPx(math.floor(cx + 0.5))
+        px = math.floor(cx + 0.5)
     end
-    local data  = { type = "V", px = px }
-    local entry = CreateGuideFrame(data)
+    local entry = CreateGuideFrame({ type = "V", px = px })
     _guideFrames[#_guideFrames + 1] = entry
     AlignTools:SaveGuides()
     return entry
