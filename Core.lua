@@ -187,14 +187,15 @@ end
 -- SCALE APPLICATION
 -- =============================================================================
 
---- Apply the pixel-perfect scale to UIParent.
+--- Apply the pixel-perfect scale.
 ---
---- At 4K this applies scale=0.7111 (N=2 density), NOT the tiny 0.3556.
---- N=2 means 1 region unit = exactly 2 physical pixels — same visual size as
---- 1080p but perfectly aligned. Frame widths should be even integers.
+--- When ElvUI is present (and hookElvUI is enabled) we use the COOPERATIVE
+--- path: write the target scale into ElvUI's own database, then call
+--- E:UpdateUIScale() so ElvUI applies it and recalculates E.mult in one shot.
+--- No fighting, no 50ms delay, E.mult is always correct.
 ---
---- Uses SetScale() directly — this is what makes it work when the computed
---- scale is below the 0.64 CVar floor (primarily 1440p N=1 = 0.5333).
+--- When ElvUI is absent (or hookElvUI disabled) we call UIParent:SetScale()
+--- directly, which bypasses the 0.64 CVar floor.
 ---
 --- @param scale  number?   Defaults to auto pixel-perfect for this resolution
 function PPUI:ApplyScale(scale)
@@ -204,17 +205,35 @@ function PPUI:ApplyScale(scale)
 
     self._applying = true
 
-    -- THE FIX: direct SetScale() bypasses the 0.64 CVar floor
-    UIParent:SetScale(scale)
+    local E = self:E()
+    if E and self.db.hookElvUI then
+        -- ── Cooperative path ─────────────────────────────────────────────
+        -- Write target into ElvUI's db so UpdateUIScale applies our value.
+        -- ElvUI then recalculates E.mult automatically — no SyncElvUI needed.
+        if E.db and E.db.general then
+            E.db.general.uiScale = scale
+        end
+        E.uiScale = scale   -- update cached value too in case db path is absent
+        E:UpdateUIScale()
 
-    -- Update CVar to nearest legal value. For >1200p this will be clamped to
-    -- 0.64, which is wrong — but the actual rendering uses SetScale(), so this
-    -- only affects what shows in the System→Graphics→UI Scale slider.
-    SetCVarSafe("useUiScale", "1")
-    SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
+        -- Safety net: some ElvUI versions clamp E.db.general.uiScale to the
+        -- 0.64 CVar floor before calling UIParent:SetScale(). If that happened,
+        -- override directly and patch E.mult manually.
+        local _, physH = self:GetPhysicalSize()
+        if math.abs(UIParent:GetScale() - scale) > 0.000005 then
+            UIParent:SetScale(scale)
+            E.uiScale = scale
+            E.mult    = 768 / (physH * scale)
+        end
+    else
+        -- ── Direct path (no ElvUI, or ElvUI hook disabled) ───────────────
+        UIParent:SetScale(scale)
+        SetCVarSafe("useUiScale", "1")
+        SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
+    end
 
-    -- Clear the flag after a short delay — long enough to swallow the
-    -- DISPLAY_SIZE_CHANGED event that UIParent:SetScale() fires synchronously.
+    -- Hold the flag long enough to absorb the DISPLAY_SIZE_CHANGED event
+    -- that UIParent:SetScale() fires synchronously.
     C_Timer.After(0.1, function() self._applying = false end)
 
     if self.GUI and self.GUI:IsShown() then
@@ -273,39 +292,42 @@ function PPUI:GetElvUIInfo()
     }
 end
 
---- Hook ElvUI's UpdateUIScale so it cannot override our scale after login.
+--- Register a cooperative hook on ElvUI's UpdateUIScale.
 ---
---- ElvUI calls UpdateUIScale during init and on certain events. Without this
---- hook, ElvUI will reset UIParent back to its own (CVar-clamped) scale and
---- undo everything we set.
+--- If something outside this addon triggers UpdateUIScale (e.g. ElvUI's own
+--- init sequence, a reload, or another addon), we intercept it, correct
+--- E.db.general.uiScale to our target, and call ApplyScale() so the result
+--- is always pixel-perfect. The _applying guard prevents re-entrant loops.
 function PPUI:HookElvUI()
     local E = self:E()
     if not E or self._elvuiHooked then return end
 
     hooksecurefunc(E, "UpdateUIScale", function()
-        if self.db and self.db.enabled and self.db.hookElvUI and not self._applying then
-            -- Delay slightly so ElvUI finishes its own SetScale call first,
-            -- then we override it back to the pixel-perfect value.
-            C_Timer.After(0.05, function()
-                if self.db and self.db.enabled and self.db.hookElvUI then
-                    self:ApplyScale()
-                end
-            end)
+        -- We triggered this call ourselves — skip to avoid a loop.
+        if self._applying then return end
+        if not (self.db and self.db.enabled and self.db.hookElvUI) then return end
+
+        local target = self.db.useManualScale
+            and self.db.manualScale or self:GetPixelPerfectScale()
+
+        if math.abs(UIParent:GetScale() - target) > 0.000005 then
+            -- Correct ElvUI's db so our ApplyScale cooperative path works.
+            if E.db and E.db.general then
+                E.db.general.uiScale = target
+            end
+            self:ApplyScale(target)
         end
     end)
 
     self._elvuiHooked = true
-    self:Log("ElvUI hook active.")
+    self:Log("ElvUI hook active — cooperative mode.")
 end
 
---- Force-write the current UIParent scale into ElvUI's internal tracking variables.
+--- Force-reapply the pixel-perfect scale and resync ElvUI's internal state.
 ---
---- ElvUI stores uiScale and mult at login. If we change UIParent:SetScale()
---- after ElvUI has already cached these, ElvUI's 1px border math (via E.mult)
---- will be wrong. This function corrects that.
----
---- Call this if you notice ElvUI borders looking too thick or non-existent after
---- applying pixel-perfect scale.
+--- In normal operation this is not needed — ApplyScale() via the cooperative
+--- path keeps E.uiScale and E.mult correct automatically. Use this as a
+--- manual repair if ElvUI's borders look wrong after a /reload or addon update.
 function PPUI:SyncElvUI()
     local E = self:E()
     if not E then
@@ -313,20 +335,11 @@ function PPUI:SyncElvUI()
         return
     end
 
-    local curScale = UIParent:GetScale()
-    local _, physH = self:GetPhysicalSize()
-
-    E.uiScale = curScale
-    -- E.mult = how many region-units represent 1 physical pixel
-    -- ElvUI uses this for SetWidth(E.mult) to draw 1-pixel-wide borders
-    E.mult = 768 / (physH * curScale)
+    self:ApplyScale()
 
     self:Log(string.format(
-        "ElvUI synced → E.uiScale=%.6f  E.mult=%.6f", E.uiScale, E.mult))
-
-    if self.GUI and self.GUI:IsShown() then
-        self.GUI:Refresh()
-    end
+        "ElvUI synced → E.uiScale=%.6f  E.mult=%.6f",
+        E.uiScale or 0, E.mult or 0))
 end
 
 -- =============================================================================
