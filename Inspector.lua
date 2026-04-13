@@ -352,9 +352,9 @@ local function GetFocusedFrame()
     _intercept:Hide()
     local focused
     if GetMouseFoci then
-        -- Dragonflight+ returns a list; take the topmost non-skip frame
-        local foci = GetMouseFoci()
-        if foci then
+        -- GetMouseFoci() returns varargs, not a table — pack them first
+        local foci = { GetMouseFoci() }
+        if #foci > 0 then
             for _, f in ipairs(foci) do
                 if not IsSkippable(f) then
                     focused = f
@@ -834,11 +834,12 @@ function Inspector:Start()
     CreateHighlight()
     CreateIntercept()
     BuildPanel()
-    _active  = false   -- reset before enabling to flush hover state
-    _locked  = false
-    _hovered = nil
-    _target  = nil
-    _active  = true
+    _active   = false   -- reset before enabling to flush hover state
+    _locked   = false
+    _hovered  = nil
+    _target   = nil
+    _throttle = 0       -- reset so first hover fires immediately
+    _active   = true
     _intercept:Show()
     _panel:Show()
     print("|cff7ec8e3PixelPerfectUI:|r Inspector active — "

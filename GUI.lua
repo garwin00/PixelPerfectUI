@@ -273,7 +273,8 @@ function PPUI:CreateGUI()
     slider:SetScript("OnValueChanged", function(self, val)
         PPUI.db.manualScale = val
         win._sliderValFS:SetText(string.format("|c%s%.4f|r", C.white, val))
-        if self._enabled and PPUI.db.enabled and PPUI.db.useManualScale then
+        if self._enabled and PPUI.db.enabled and PPUI.db.useManualScale
+                and not win._refreshing then
             PPUI:ApplyScale(val)
         end
     end)
@@ -513,6 +514,7 @@ function PPUI:CreateGUI()
     -- REFRESH  — updates every displayed field
     -- =========================================================================
     function win:Refresh()
+        self._refreshing = true
         local physW, physH = PPUI:GetPhysicalSize()
         local cur     = UIParent:GetScale()
         local target  = PPUI:GetPixelPerfectScale()
@@ -619,6 +621,8 @@ function PPUI:CreateGUI()
     -- ── Alignment tools checkboxes ─────────────────────────────────────────
     if self._cbGrid   then self._cbGrid:SetChecked(PPUI.db.gridEnabled or false) end
     if self._cbCenter then self._cbCenter:SetChecked(PPUI.db.showCenter or false) end
+
+    self._refreshing = false
 
     win:SetScript("OnShow", function(self) self:Refresh() end)
 

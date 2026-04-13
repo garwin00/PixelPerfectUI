@@ -64,13 +64,6 @@ local function PxToUnits(px)
     return (px * 768) / (scale * physH)
 end
 
--- Convert UIParent region units back to physical pixels.
-local function UnitsToPx(units)
-    local _, physH = PPUI:GetPhysicalSize()
-    local scale    = UIParent:GetEffectiveScale()
-    return (units * scale * physH) / 768
-end
-
 -- Snap a pixel value to the nearest N-pixel boundary.
 local function SnapPx(px)
     local N = PPUI:GetPixelMultiplier()
@@ -79,6 +72,7 @@ end
 
 -- Ensure db sub-tables exist.
 local function EnsureDB()
+    if not PPUI.db then return end   -- guard: called before PLAYER_LOGIN in edge cases
     if not PPUI.db.guides   then PPUI.db.guides   = {} end
     if not PPUI.db.gridSize then PPUI.db.gridSize  = 32 end
     if PPUI.db.gridEnabled == nil  then PPUI.db.gridEnabled  = false end
@@ -97,14 +91,17 @@ local function TeardownGrid()
     for _, ln in ipairs(_gridLines) do
         ln:Hide()
     end
-    _gridLines = {}
+    -- NOTE: intentionally keep _gridLines populated so BuildGrid can reuse them.
+    -- WoW Line objects cannot be destroyed; reusing avoids unbounded accumulation.
 end
+
+local _gridLinesUsed = 0   -- how many entries in _gridLines are live this pass
 
 local function BuildGrid()
     EnsureDB()
     TeardownGrid()
 
-    if not PPUI.db.gridEnabled then return end
+    if not PPUI.db.gridEnabled then _gridLinesUsed = 0; return end
 
     if not _gridCanvas then
         _gridCanvas = CreateFrame("Frame", "PPUIGridCanvas", UIParent)
@@ -115,39 +112,48 @@ local function BuildGrid()
 
     local gridPx  = math.max(4, PPUI.db.gridSize or 32)
     local alpha   = PPUI.db.gridAlpha or 0.15
-    local _, physH = PPUI:GetPhysicalSize()
-    local physW    = select(1, PPUI:GetPhysicalSize())
-    local screenH  = UIParent:GetHeight()   -- always 768
-    local screenW  = UIParent:GetWidth()
+    local physW, physH = PPUI:GetPhysicalSize()
+    local screenH = UIParent:GetHeight()   -- always 768
+    local screenW = UIParent:GetWidth()
 
     local intervalUnits = PxToUnits(gridPx)
+    if intervalUnits <= 0 then return end   -- guard: avoid infinite loop
 
-    local function MakeLine(r, g, b, a)
+    local poolIdx = 0
+
+    local function GetOrMakeLine()
+        poolIdx = poolIdx + 1
+        if _gridLines[poolIdx] then
+            _gridLines[poolIdx]:SetColorTexture(T.accent[1], T.accent[2], T.accent[3], alpha)
+            _gridLines[poolIdx]:Show()
+            return _gridLines[poolIdx]
+        end
         local ln = _gridCanvas:CreateLine()
         ln:SetThickness(1)
-        ln:SetColorTexture(r, g, b, a)
+        ln:SetColorTexture(T.accent[1], T.accent[2], T.accent[3], alpha)
+        _gridLines[poolIdx] = ln
         return ln
     end
 
     -- Horizontal lines (constant Y, full width)
     local y = intervalUnits
     while y < screenH do
-        local ln = MakeLine(T.accent[1], T.accent[2], T.accent[3], alpha)
+        local ln = GetOrMakeLine()
         ln:SetStartPoint("BOTTOMLEFT", _gridCanvas, 0, y)
         ln:SetEndPoint("BOTTOMRIGHT", _gridCanvas, 0, y)
-        _gridLines[#_gridLines + 1] = ln
         y = y + intervalUnits
     end
 
     -- Vertical lines (constant X, full height)
     local x = intervalUnits
     while x < screenW do
-        local ln = MakeLine(T.accent[1], T.accent[2], T.accent[3], alpha)
+        local ln = GetOrMakeLine()
         ln:SetStartPoint("BOTTOMLEFT", _gridCanvas, x, 0)
         ln:SetEndPoint("TOPLEFT", _gridCanvas, x, 0)
-        _gridLines[#_gridLines + 1] = ln
         x = x + intervalUnits
     end
+
+    _gridLinesUsed = poolIdx
 end
 
 function AlignTools:ToggleGrid()
@@ -286,6 +292,8 @@ local function CreateGuideFrame(data)
 
     f:SetScript("OnMouseDown", function(self, btn)
         if btn == "LeftButton" then
+            -- Cache N once at drag start; it won't change while dragging
+            self._snapN  = PPUI:GetPixelMultiplier()
             self._dragging = true
         end
     end)
@@ -293,6 +301,7 @@ local function CreateGuideFrame(data)
     f:SetScript("OnMouseUp", function(self, btn)
         if btn == "LeftButton" then
             self._dragging = false
+            self._snapN    = nil
             data.px = self._currentPx or data.px
             AlignTools:SaveGuides()
         elseif btn == "RightButton" then
@@ -304,9 +313,10 @@ local function CreateGuideFrame(data)
         if not self._dragging then return end
         local cx, cy = GetCursorPosition()
         local rawPx = data.type == "H" and cy or cx
-        local px    = SnapPx(math.floor(rawPx + 0.5))
+        local N     = self._snapN or 1
+        local px    = math.floor(rawPx / N + 0.5) * N
         if px ~= data.px then
-            data.px        = px
+            data.px         = px
             self._currentPx = px
             PositionGuide(entry)
         end
