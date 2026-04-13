@@ -213,7 +213,9 @@ function PPUI:ApplyScale(scale)
     SetCVarSafe("useUiScale", "1")
     SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
 
-    self._applying = false
+    -- Clear the flag after a short delay — long enough to swallow the
+    -- DISPLAY_SIZE_CHANGED event that UIParent:SetScale() fires synchronously.
+    C_Timer.After(0.1, function() self._applying = false end)
 
     if self.GUI and self.GUI:IsShown() then
         self.GUI:Refresh()
@@ -225,7 +227,7 @@ function PPUI:ResetScale()
     self._applying = true
     UIParent:SetScale(1.0)
     SetCVarSafe("useUiScale", "0")
-    self._applying = false
+    C_Timer.After(0.1, function() self._applying = false end)
 
     if self.GUI and self.GUI:IsShown() then
         self.GUI:Refresh()
@@ -363,14 +365,21 @@ PPUI:SetScript("OnEvent", function(self, event, arg1)
         end)
 
     elseif event == "DISPLAY_SIZE_CHANGED" then
+        -- Guard: UIParent:SetScale() itself fires DISPLAY_SIZE_CHANGED, which
+        -- would cause an infinite loop. Skip if we triggered this change.
+        if self._applying then return end
         if self.db and self.db.enabled and self.db.autoApply then
             -- Debounce: display change events can fire in rapid succession
             if self._displayTimer then self._displayTimer:Cancel() end
             self._displayTimer = C_Timer.NewTimer(0.5, function()
-                self:ApplyScale()
-                -- Rebuild alignment overlays after scale/resolution change
-                if ns.AlignTools then ns.AlignTools:RebuildAll() end
-                self:Log("Display changed — scale updated.")
+                -- Skip if scale is already correct (avoids a second re-trigger)
+                local target = self.db.useManualScale
+                    and self.db.manualScale or self:GetPixelPerfectScale()
+                if math.abs(UIParent:GetScale() - target) > 0.0001 then
+                    self:ApplyScale(target)
+                    if ns.AlignTools then ns.AlignTools:RebuildAll() end
+                    self:Log("Display changed — scale updated.")
+                end
             end)
         end
     end
