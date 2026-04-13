@@ -318,11 +318,11 @@ function PPUI:CreateGUI()
         end)
         win._cbEnable = cbEnable;  Y = Y - 24
 
-        local cbAuto = MakeCheckbox(p, "Auto-apply on login and display changes", PAD + 2, Y)
+        local cbAuto = MakeCheckbox(p, "Apply automatically on each login", PAD + 2, Y)
         cbAuto:SetScript("OnClick", function(self) PPUI.db.autoApply = self:GetChecked() end)
         win._cbAuto = cbAuto;  Y = Y - 24
 
-        local cbManual = MakeCheckbox(p, "Override with manual scale value", PAD + 2, Y)
+        local cbManual = MakeCheckbox(p, "Use a custom scale instead of optimal", PAD + 2, Y)
         cbManual:SetScript("OnClick", function(self)
             PPUI.db.useManualScale = self:GetChecked()
             win._slider:SetSliderEnabled(self:GetChecked())
@@ -618,7 +618,7 @@ function PPUI:CreateGUI()
                 string.format("|cff33dd55● PIXEL PERFECT  |r|cff888888%s|r", density))
         else
             self._statusDot:SetColorTexture(T.warn[1], T.warn[2], T.warn[3], 1)
-            self._statusFS:SetText("|cffff9933● ENABLED — SCALE MISMATCH|r")
+            self._statusFS:SetText("|cffff9933● ENABLED — not yet applied this session|r")
         end
 
         -- ── Scale tab values ──────────────────────────────────────────────

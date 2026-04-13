@@ -58,6 +58,8 @@ Enter any region-unit value and see what it snaps to, how many physical pixels t
 
 ## Usage
 
+UI scale is a **set-and-forget** setting. Open the window once, click **Set Optimal**, and you're done. The addon will re-apply the same scale automatically on every subsequent login — you never need to touch it again unless you change monitor or resolution.
+
 Open the settings window with the minimap button or `/pp`.
 
 | Tab | What's here |
