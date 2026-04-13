@@ -206,30 +206,23 @@ function PPUI:ApplyScale(scale)
     self._applying = true
 
     local E = self:E()
-    if E and self.db.hookElvUI then
-        -- ── Cooperative path ─────────────────────────────────────────────
-        -- Write target into ElvUI's db so UpdateUIScale applies our value.
-        -- ElvUI then recalculates E.mult automatically — no SyncElvUI needed.
+    local _, physH = self:GetPhysicalSize()
+
+    -- Always apply via SetScale() — direct and reliable.
+    -- The CVar has a 0.64 floor; SetScale() bypasses it (needed for 1440p etc).
+    UIParent:SetScale(scale)
+    SetCVarSafe("useUiScale", "1")
+    SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
+
+    -- If ElvUI is loaded, patch its cached scale values so its 1px border
+    -- calculations (E.mult) stay correct. We do this directly rather than
+    -- calling E:UpdateUIScale() which may not exist in all ElvUI versions.
+    if E then
+        E.uiScale = scale
+        E.mult    = 768 / (physH * scale)
         if E.db and E.db.general then
             E.db.general.uiScale = scale
         end
-        E.uiScale = scale   -- update cached value too in case db path is absent
-        E:UpdateUIScale()
-
-        -- Safety net: some ElvUI versions clamp E.db.general.uiScale to the
-        -- 0.64 CVar floor before calling UIParent:SetScale(). If that happened,
-        -- override directly and patch E.mult manually.
-        local _, physH = self:GetPhysicalSize()
-        if math.abs(UIParent:GetScale() - scale) > 0.000005 then
-            UIParent:SetScale(scale)
-            E.uiScale = scale
-            E.mult    = 768 / (physH * scale)
-        end
-    else
-        -- ── Direct path (no ElvUI, or ElvUI hook disabled) ───────────────
-        UIParent:SetScale(scale)
-        SetCVarSafe("useUiScale", "1")
-        SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
     end
 
     -- Hold the flag long enough to absorb the DISPLAY_SIZE_CHANGED event
@@ -302,25 +295,32 @@ function PPUI:HookElvUI()
     local E = self:E()
     if not E or self._elvuiHooked then return end
 
-    hooksecurefunc(E, "UpdateUIScale", function()
-        -- We triggered this call ourselves — skip to avoid a loop.
-        if self._applying then return end
-        if not (self.db and self.db.enabled and self.db.hookElvUI) then return end
+    -- Only hook if the method actually exists — it may be absent in some
+    -- ElvUI builds or forks.
+    if type(E.UpdateUIScale) == "function" then
+        hooksecurefunc(E, "UpdateUIScale", function()
+            -- We triggered this call ourselves — skip to avoid a loop.
+            if self._applying then return end
+            if not (self.db and self.db.enabled and self.db.hookElvUI) then return end
 
-        local target = self.db.useManualScale
-            and self.db.manualScale or self:GetPixelPerfectScale()
+            local target = self.db.useManualScale
+                and self.db.manualScale or self:GetPixelPerfectScale()
 
-        if math.abs(UIParent:GetScale() - target) > 0.000005 then
-            -- Correct ElvUI's db so our ApplyScale cooperative path works.
-            if E.db and E.db.general then
-                E.db.general.uiScale = target
+            if math.abs(UIParent:GetScale() - target) > 0.000005 then
+                self:ApplyScale(target)
             end
-            self:ApplyScale(target)
-        end
-    end)
+        end)
+        self:Log("ElvUI hook active.")
+    else
+        self:Log("ElvUI detected — UpdateUIScale not found, skipping hook.")
+    end
 
     self._elvuiHooked = true
-    self:Log("ElvUI hook active — cooperative mode.")
+
+    -- Apply now that ElvUI is fully initialised.
+    if self.db.enabled and self.db.autoApply then
+        self:ApplyScale()
+    end
 end
 
 --- Force-reapply the pixel-perfect scale and resync ElvUI's internal state.
@@ -363,8 +363,13 @@ PPUI:SetScript("OnEvent", function(self, event, arg1)
         end
 
         if self.db.enabled and self.db.autoApply then
-            -- Small delay so Blizzard UI finishes its own layout pass first
-            C_Timer.After(0.1, function() self:ApplyScale() end)
+            -- If ElvUI is present, delay until after ElvUI finishes its own
+            -- init sequence (hookElvUI fires at 0.8s and calls ApplyScale).
+            -- Without ElvUI, apply immediately after Blizzard's layout pass.
+            local hasElvUI = ElvUI ~= nil
+            if not hasElvUI or not self.db.hookElvUI then
+                C_Timer.After(0.1, function() self:ApplyScale() end)
+            end
         end
 
         -- Init alignment tools (guides, grid, center indicator) after UI settles
