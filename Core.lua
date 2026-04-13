@@ -204,12 +204,33 @@ function PPUI:ApplyScale(scale)
 
     self._applying = true
     UIParent:SetScale(scale)
-    -- Keep the CVar in sync so Blizzard's UI Scale slider reflects reality.
     SetCVarSafe("useUiScale", "1")
     SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
 
-    -- Hold the flag long enough to absorb DISPLAY_SIZE_CHANGED.
-    C_Timer.After(0.5, function() self._applying = false end)
+    -- Stage 1: clear flag quickly (DISPLAY_SIZE_CHANGED fires synchronously,
+    -- so it has already been processed before we reach this timer).
+    C_Timer.After(0.1, function()
+        self._applying = false
+    end)
+
+    -- Stage 2: verify the scale actually stuck after ElvUI / other addons have
+    -- had time to run their own post-login hooks (~0.8s). If something reset
+    -- it, apply once more. This is a one-shot retry — not a polling loop.
+    C_Timer.After(0.8, function()
+        if not (self.db and self.db.enabled) then return end
+        local t = self.db.useManualScale and self.db.manualScale
+                  or self:GetPixelPerfectScale()
+        if math.abs(UIParent:GetScale() - t) > 0.000005 then
+            self._applying = true
+            UIParent:SetScale(t)
+            SetCVarSafe("useUiScale", "1")
+            SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, t))))
+            C_Timer.After(0.1, function() self._applying = false end)
+            -- Rebuild rulers now that scale is correct.
+            if ns.AlignTools then ns.AlignTools:RebuildAll() end
+            if self.GUI and self.GUI:IsShown() then self.GUI:Refresh() end
+        end
+    end)
 
     if self.GUI and self.GUI:IsShown() then
         self.GUI:Refresh()
@@ -305,13 +326,17 @@ PPUI:SetScript("OnEvent", function(self, event, arg1)
         -- Install scale defence hook once, before any apply.
         self:InstallScaleHook()
 
-        -- Init alignment tools after UI settles.
+        -- Init alignment tools at 0.3s, then rebuild again at 2s once scale
+        -- is confirmed stable (the retry in ApplyScale fires at ~1.8s).
         C_Timer.After(0.3, function()
             if ns.AlignTools then ns.AlignTools:Init() end
         end)
+        C_Timer.After(2.0, function()
+            if ns.AlignTools then ns.AlignTools:RebuildAll() end
+        end)
 
-        -- Apply scale after a delay so Blizzard and ElvUI both finish their
-        -- own login layout passes first. Our hook defends against resets.
+        -- Apply at 1.0s — after Blizzard and ElvUI both finish init.
+        -- ApplyScale() will verify at +0.8s and retry if ElvUI reset it.
         if self.db.enabled and self.db.autoApply then
             C_Timer.After(1.0, function() self:ApplyScale() end)
         end
