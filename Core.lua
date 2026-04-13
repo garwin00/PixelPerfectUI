@@ -189,12 +189,15 @@ end
 
 --- Apply the pixel-perfect scale.
 ---
---- Uses UIParent:SetScale() directly — the same mechanism Blizzard's own UI
---- uses. Bypasses the 0.64 CVar floor that blocks sub-64% scales (needed at
---- 1440p where the ideal scale is 0.5333).
+--- When ElvUI is present we write our target into E.global.general.UIScale
+--- and call E:UIScale() so ElvUI applies it itself, recalculating E.uiscale,
+--- E.screenWidth/Height, and E.mult in one pass.
 ---
---- ElvUI is left entirely alone. If anything resets our scale, the
---- UIParent:SetScale hook installed at login will re-apply on the next frame.
+--- CRITICAL: we must NOT call SetCVar("uiScale") when ElvUI is present.
+--- That CVar change fires UI_SCALE_CHANGED, which ElvUI catches and uses to
+--- call E:UIScale() with its own stored value — overwriting our scale.
+---
+--- Without ElvUI: UIParent:SetScale() directly + CVar sync.
 ---
 --- @param scale  number?   Defaults to auto pixel-perfect for this resolution
 function PPUI:ApplyScale(scale)
@@ -203,34 +206,26 @@ function PPUI:ApplyScale(scale)
                       or self:GetPixelPerfectScale())
 
     self._applying = true
-    UIParent:SetScale(scale)
-    SetCVarSafe("useUiScale", "1")
-    SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
 
-    -- Stage 1: clear flag quickly (DISPLAY_SIZE_CHANGED fires synchronously,
-    -- so it has already been processed before we reach this timer).
-    C_Timer.After(0.1, function()
-        self._applying = false
-    end)
-
-    -- Stage 2: verify the scale actually stuck after ElvUI / other addons have
-    -- had time to run their own post-login hooks (~0.8s). If something reset
-    -- it, apply once more. This is a one-shot retry — not a polling loop.
-    C_Timer.After(0.8, function()
-        if not (self.db and self.db.enabled) then return end
-        local t = self.db.useManualScale and self.db.manualScale
-                  or self:GetPixelPerfectScale()
-        if math.abs(UIParent:GetScale() - t) > 0.000005 then
-            self._applying = true
-            UIParent:SetScale(t)
-            SetCVarSafe("useUiScale", "1")
-            SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, t))))
-            C_Timer.After(0.1, function() self._applying = false end)
-            -- Rebuild rulers now that scale is correct.
-            if ns.AlignTools then ns.AlignTools:RebuildAll() end
-            if self.GUI and self.GUI:IsShown() then self.GUI:Refresh() end
+    local E = self:E()
+    if E and type(E.UIScale) == "function" then
+        -- Write target into ElvUI's db, then let ElvUI's own function apply it.
+        if E.global and E.global.general then
+            E.global.general.UIScale = scale
         end
-    end)
+        E:UIScale()   -- calls UIParent:SetScale(E.global.general.UIScale) internally
+        if type(E.UIMult) == "function" then
+            E:UIMult()  -- recalculates E.mult = E.perfect / E.global.general.UIScale
+        end
+    else
+        -- No ElvUI: apply directly. CVar is safe to set here because there's
+        -- nothing listening to UI_SCALE_CHANGED that will fight back.
+        UIParent:SetScale(scale)
+        SetCVarSafe("useUiScale", "1")
+        SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
+    end
+
+    C_Timer.After(0.1, function() self._applying = false end)
 
     if self.GUI and self.GUI:IsShown() then
         self.GUI:Refresh()
@@ -267,28 +262,47 @@ function PPUI:GetElvUIInfo()
     local curScale  = UIParent:GetScale()
     local idealMult = 768 / (physH * curScale)
     return {
-        uiScale   = E.uiScale or 0,
+        uiScale   = (E.global and E.global.general and E.global.general.UIScale) or E.uiscale or 0,
         mult      = E.mult    or 0,
         idealMult = idealMult,
-        scaleOK   = E.uiScale and math.abs(E.uiScale - curScale)  < 0.000005,
-        multOK    = E.mult    and math.abs(E.mult    - idealMult) < 0.000005,
+        scaleOK   = E.uiscale and math.abs(E.uiscale - curScale) < 0.000005,
+        multOK    = E.mult    and math.abs(E.mult - idealMult)   < 0.000005,
     }
 end
 
---- Install a hook on UIParent:SetScale so that if anything (ElvUI, Blizzard,
---- another addon) resets the scale we re-apply our target on the next frame.
---- Called once at login; safe to call multiple times (guarded by _scaleHooked).
+--- Install a hook on E:UIScale() (ElvUI present) or UIParent:SetScale (no ElvUI)
+--- so that if anything resets our scale we re-apply on the next frame.
+--- Called once at login; guarded by _scaleHooked.
 function PPUI:InstallScaleHook()
     if self._scaleHooked then return end
-    hooksecurefunc(UIParent, "SetScale", function(_, newScale)
-        if self._applying then return end
-        if not (self.db and self.db.enabled) then return end
-        local target = self.db.useManualScale
-            and self.db.manualScale or self:GetPixelPerfectScale()
-        if math.abs(newScale - target) > 0.000005 then
-            C_Timer.After(0, function() self:ApplyScale(target) end)
-        end
-    end)
+
+    local E = self:E()
+    if E and type(E.UIScale) == "function" then
+        -- Hook ElvUI's own scale function. Fires after E:UIScale() runs.
+        -- If E.global.general.UIScale doesn't match our target, correct it.
+        hooksecurefunc(E, "UIScale", function()
+            if self._applying then return end
+            if not (self.db and self.db.enabled) then return end
+            local target = self.db.useManualScale
+                and self.db.manualScale or self:GetPixelPerfectScale()
+            if math.abs(UIParent:GetScale() - target) > 0.000005 then
+                C_Timer.After(0, function() self:ApplyScale(target) end)
+            end
+        end)
+        self:Log("ElvUI scale hook active (E:UIScale).")
+    else
+        -- No ElvUI: hook UIParent:SetScale directly.
+        hooksecurefunc(UIParent, "SetScale", function(_, newScale)
+            if self._applying then return end
+            if not (self.db and self.db.enabled) then return end
+            local target = self.db.useManualScale
+                and self.db.manualScale or self:GetPixelPerfectScale()
+            if math.abs(newScale - target) > 0.000005 then
+                C_Timer.After(0, function() self:ApplyScale(target) end)
+            end
+        end)
+    end
+
     self._scaleHooked = true
 end
 
@@ -323,22 +337,25 @@ PPUI:SetScript("OnEvent", function(self, event, arg1)
             self.db          = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
         end
 
-        -- Install scale defence hook once, before any apply.
-        self:InstallScaleHook()
+        -- Install scale defence hook once at login.
+        -- Must run after ElvUI has registered E:UIScale, so defer briefly.
+        C_Timer.After(0.5, function() self:InstallScaleHook() end)
 
-        -- Init alignment tools at 0.3s, then rebuild again at 2s once scale
-        -- is confirmed stable (the retry in ApplyScale fires at ~1.8s).
+        -- Init alignment tools after UI settles.
         C_Timer.After(0.3, function()
             if ns.AlignTools then ns.AlignTools:Init() end
         end)
-        C_Timer.After(2.0, function()
-            if ns.AlignTools then ns.AlignTools:RebuildAll() end
-        end)
 
-        -- Apply at 1.0s — after Blizzard and ElvUI both finish init.
-        -- ApplyScale() will verify at +0.8s and retry if ElvUI reset it.
+        -- Apply at 1.5s — after ElvUI's own login sequence (which calls
+        -- E:UIScale() at ~1s via its PLAYER_ENTERING_WORLD handler).
+        -- Our hook then defends against any further resets.
         if self.db.enabled and self.db.autoApply then
-            C_Timer.After(1.0, function() self:ApplyScale() end)
+            C_Timer.After(1.5, function()
+                self:ApplyScale()
+                C_Timer.After(0.3, function()
+                    if ns.AlignTools then ns.AlignTools:RebuildAll() end
+                end)
+            end)
         end
 
     elseif event == "DISPLAY_SIZE_CHANGED" then
