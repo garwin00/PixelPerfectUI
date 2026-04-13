@@ -313,7 +313,6 @@ function PPUI:CreateGUI()
         local cbEnable = MakeCheckbox(p, "Enable Pixel Perfect Mode", PAD + 2, Y)
         cbEnable:SetScript("OnClick", function(self)
             PPUI.db.enabled = self:GetChecked()
-            if PPUI.db.enabled then PPUI:ApplyScale() else PPUI:ResetScale() end
             win:Refresh()
         end)
         win._cbEnable = cbEnable;  Y = Y - 24
@@ -326,7 +325,6 @@ function PPUI:CreateGUI()
         cbManual:SetScript("OnClick", function(self)
             PPUI.db.useManualScale = self:GetChecked()
             win._slider:SetSliderEnabled(self:GetChecked())
-            if PPUI.db.enabled then PPUI:ApplyScale() end
             win:Refresh()
         end)
         win._cbManual = cbManual;  Y = Y - 28
@@ -340,10 +338,6 @@ function PPUI:CreateGUI()
         slider:SetScript("OnValueChanged", function(self, val)
             PPUI.db.manualScale = val
             win._sliderValFS:SetText(string.format("|c%s%.4f|r", C.white, val))
-            if self._enabled and PPUI.db.enabled and PPUI.db.useManualScale
-                    and not win._refreshing then
-                PPUI:ApplyScale(val)
-            end
         end)
         win._slider = slider;  Y = Y - 22
 
@@ -356,7 +350,11 @@ function PPUI:CreateGUI()
         local btnApply = MakeButton(p, "Apply Now", 108, 22)
         btnApply:SetPoint("TOPLEFT", p, "TOPLEFT", PAD + 2, Y)
         btnApply:SetScript("OnClick", function()
-            PPUI:ApplyScale(); PPUI:Log("Scale applied."); win:Refresh()
+            local scale = PPUI.db.useManualScale and PPUI.db.manualScale
+                          or PPUI:GetPixelPerfectScale()
+            PPUI:ApplyScale(scale)
+            PPUI:Log(string.format("Scale %.6f applied.", scale))
+            win:Refresh()
         end)
 
         local btnOptimal = MakeButton(p, "Set Optimal", 108, 22)
@@ -365,19 +363,10 @@ function PPUI:CreateGUI()
             PPUI.db.useManualScale = false
             win._cbManual:SetChecked(false)
             win._slider:SetSliderEnabled(false)
-            PPUI:ApplyScale()
+            local scale = PPUI:GetPixelPerfectScale()
+            PPUI:ApplyScale(scale)
             win:Refresh()
-            PPUI:Log(string.format("Optimal scale %.6f applied.", PPUI:GetPixelPerfectScale()))
-        end)
-
-        local btnReset = MakeButton(p, "Reset Default", 108, 22)
-        btnReset:SetPoint("LEFT", btnOptimal, "RIGHT", 6, 0)
-        btnReset:SetScript("OnClick", function()
-            PPUI.db.enabled = false
-            win._cbEnable:SetChecked(false)
-            PPUI:ResetScale()
-            win:Refresh()
-            PPUI:Log("Scale reset to WoW default.")
+            PPUI:Log(string.format("Optimal scale %.6f applied.", scale))
         end)
     end
 
@@ -607,10 +596,7 @@ function PPUI:CreateGUI()
         local frac    = pxPerU - math.floor(pxPerU + 0.00001)
 
         -- ── Status indicator ───────────────────────────────────────────────
-        if not PPUI.db.enabled then
-            self._statusDot:SetColorTexture(T.bad[1],  T.bad[2],  T.bad[3],  1)
-            self._statusFS:SetText("|cffdd3333● DISABLED|r")
-        elseif perfect then
+        if perfect then
             self._statusDot:SetColorTexture(T.good[1], T.good[2], T.good[3], 1)
             local density = N == 1 and "1px/unit"
                 or string.format("%dpx/unit  (×%d density)", N, N)
@@ -618,7 +604,9 @@ function PPUI:CreateGUI()
                 string.format("|cff33dd55● PIXEL PERFECT  |r|cff888888%s|r", density))
         else
             self._statusDot:SetColorTexture(T.warn[1], T.warn[2], T.warn[3], 1)
-            self._statusFS:SetText("|cffff9933● ENABLED — not yet applied this session|r")
+            self._statusFS:SetText(string.format(
+                "|cffff9933● Scale mismatch  |r|cff888888current %.4f → target %.4f|r",
+                cur, target))
         end
 
         -- ── Scale tab values ──────────────────────────────────────────────

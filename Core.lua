@@ -187,69 +187,35 @@ end
 -- SCALE APPLICATION
 -- =============================================================================
 
---- Apply the pixel-perfect scale.
----
---- When ElvUI is present we write our target into E.global.general.UIScale
---- and call E:UIScale() so ElvUI applies it itself, recalculating E.uiscale,
---- E.screenWidth/Height, and E.mult in one pass.
----
---- CRITICAL: we must NOT call SetCVar("uiScale") when ElvUI is present.
---- That CVar change fires UI_SCALE_CHANGED, which ElvUI catches and uses to
---- call E:UIScale() with its own stored value — overwriting our scale.
----
---- Without ElvUI: UIParent:SetScale() directly + CVar sync.
----
+--- Apply a scale value.
+--- With ElvUI: writes into E.global.general.UIScale and calls E:UIScale()
+--- so ElvUI owns the change and recalculates E.mult correctly.
+--- Without ElvUI: UIParent:SetScale() directly.
+--- NOTE: no enabled/disabled guard here — always works when called explicitly.
 --- @param scale  number?   Defaults to auto pixel-perfect for this resolution
 function PPUI:ApplyScale(scale)
-    if not self.db or not self.db.enabled then return end
-    scale = scale or (self.db.useManualScale and self.db.manualScale
+    scale = scale or (self.db and self.db.useManualScale and self.db.manualScale
                       or self:GetPixelPerfectScale())
-
-    self._applying = true
 
     local E = self:E()
     if E and type(E.UIScale) == "function" then
-        -- Write target into ElvUI's db, then let ElvUI's own function apply it.
         if E.global and E.global.general then
             E.global.general.UIScale = scale
         end
-        E:UIScale()   -- calls UIParent:SetScale(E.global.general.UIScale) internally
-        if type(E.UIMult) == "function" then
-            E:UIMult()  -- recalculates E.mult = E.perfect / E.global.general.UIScale
-        end
+        E:UIScale()
+        if type(E.UIMult) == "function" then E:UIMult() end
     else
-        -- No ElvUI: apply directly. CVar is safe to set here because there's
-        -- nothing listening to UI_SCALE_CHANGED that will fight back.
         UIParent:SetScale(scale)
         SetCVarSafe("useUiScale", "1")
         SetCVarSafe("uiScale", string.format("%.6f", math.max(0.64, math.min(2.0, scale))))
     end
 
-    C_Timer.After(0.1, function() self._applying = false end)
-
     if self.GUI and self.GUI:IsShown() then
         self.GUI:Refresh()
     end
 end
-
---- Remove our override and return to WoW's default scaling behaviour.
-function PPUI:ResetScale()
-    self._applying = true
-    UIParent:SetScale(1.0)
-    SetCVarSafe("useUiScale", "0")
-    C_Timer.After(0.1, function() self._applying = false end)
-
-    if self.GUI and self.GUI:IsShown() then
-        self.GUI:Refresh()
-    end
-end
-
--- =============================================================================
--- SCALE DEFENCE HOOK
--- =============================================================================
 
 --- Returns the ElvUI engine object (E), or nil if ElvUI is not loaded.
---- Kept for diagnostics / GUI display only — we no longer call into ElvUI.
 function PPUI:E()
     return ElvUI and ElvUI[1] or nil
 end
@@ -270,53 +236,8 @@ function PPUI:GetElvUIInfo()
     }
 end
 
---- Install a hook on E:UIScale() (ElvUI present) or UIParent:SetScale (no ElvUI)
---- so that if anything resets our scale we re-apply on the next frame.
---- Called once at login; guarded by _scaleHooked.
-function PPUI:InstallScaleHook()
-    if self._scaleHooked then return end
-
-    local E = self:E()
-    if E and type(E.UIScale) == "function" then
-        -- Hook ElvUI's own scale function. Fires after E:UIScale() runs.
-        -- If E.global.general.UIScale doesn't match our target, correct it.
-        hooksecurefunc(E, "UIScale", function()
-            if self._applying then return end
-            if not (self.db and self.db.enabled) then return end
-            local target = self.db.useManualScale
-                and self.db.manualScale or self:GetPixelPerfectScale()
-            if math.abs(UIParent:GetScale() - target) > 0.000005 then
-                C_Timer.After(0, function() self:ApplyScale(target) end)
-            end
-        end)
-        self:Log("ElvUI scale hook active (E:UIScale).")
-    else
-        -- No ElvUI: hook UIParent:SetScale directly.
-        hooksecurefunc(UIParent, "SetScale", function(_, newScale)
-            if self._applying then return end
-            if not (self.db and self.db.enabled) then return end
-            local target = self.db.useManualScale
-                and self.db.manualScale or self:GetPixelPerfectScale()
-            if math.abs(newScale - target) > 0.000005 then
-                C_Timer.After(0, function() self:ApplyScale(target) end)
-            end
-        end)
-    end
-
-    self._scaleHooked = true
-end
-
---- Kept for slash command / GUI compatibility — now just re-applies scale.
-function PPUI:SyncElvUI()
-    self:ApplyScale()
-    local E = self:E()
-    if E then
-        self:Log(string.format("Scale applied. ElvUI E.mult=%.4f (ideal=%.4f)",
-            E.mult or 0, 768 / (select(2, self:GetPhysicalSize()) * UIParent:GetScale())))
-    else
-        self:Log("Scale applied.")
-    end
-end
+--- Alias kept for slash command compatibility.
+function PPUI:SyncElvUI() self:ApplyScale() end
 
 -- =============================================================================
 -- EVENTS
@@ -324,12 +245,11 @@ end
 
 PPUI:RegisterEvent("ADDON_LOADED")
 PPUI:RegisterEvent("PLAYER_LOGIN")
-PPUI:RegisterEvent("DISPLAY_SIZE_CHANGED")
 
 PPUI:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
-        PixelPerfectUIDB       = PixelPerfectUIDB or {}
-        self.db                = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
+        PixelPerfectUIDB = PixelPerfectUIDB or {}
+        self.db          = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
 
     elseif event == "PLAYER_LOGIN" then
         if not self.db then
@@ -337,43 +257,19 @@ PPUI:SetScript("OnEvent", function(self, event, arg1)
             self.db          = setmetatable(PixelPerfectUIDB, { __index = DEFAULTS })
         end
 
-        -- Install scale defence hook once at login.
-        -- Must run after ElvUI has registered E:UIScale, so defer briefly.
-        C_Timer.After(0.5, function() self:InstallScaleHook() end)
-
         -- Init alignment tools after UI settles.
         C_Timer.After(0.3, function()
             if ns.AlignTools then ns.AlignTools:Init() end
         end)
 
-        -- Apply at 1.5s — after ElvUI's own login sequence (which calls
-        -- E:UIScale() at ~1s via its PLAYER_ENTERING_WORLD handler).
-        -- Our hook then defends against any further resets.
+        -- Auto-apply at 2s — after ElvUI's own login sequence finishes.
+        -- User can always hit Apply Now manually from the GUI.
         if self.db.enabled and self.db.autoApply then
-            C_Timer.After(1.5, function()
+            C_Timer.After(2.0, function()
                 self:ApplyScale()
                 C_Timer.After(0.3, function()
                     if ns.AlignTools then ns.AlignTools:RebuildAll() end
                 end)
-            end)
-        end
-
-    elseif event == "DISPLAY_SIZE_CHANGED" then
-        -- Guard: UIParent:SetScale() itself fires DISPLAY_SIZE_CHANGED, which
-        -- would cause an infinite loop. Skip if we triggered this change.
-        if self._applying then return end
-        if self.db and self.db.enabled and self.db.autoApply then
-            -- Debounce: display change events can fire in rapid succession
-            if self._displayTimer then self._displayTimer:Cancel() end
-            self._displayTimer = C_Timer.NewTimer(0.5, function()
-                -- Skip if scale is already correct (avoids a second re-trigger)
-                local target = self.db.useManualScale
-                    and self.db.manualScale or self:GetPixelPerfectScale()
-                if math.abs(UIParent:GetScale() - target) > 0.0001 then
-                    self:ApplyScale(target)
-                    if ns.AlignTools then ns.AlignTools:RebuildAll() end
-                    self:Log("Display changed — scale updated.")
-                end
             end)
         end
     end
