@@ -283,17 +283,17 @@ function PPUI:CreateGUI()
         { "Scale", "ElvUI", "Tools", "Diagnostics" })
 
     -- =========================================================================
-    -- TAB 1 — SCALE
+    -- TAB 1 — SCALE  (read-only info panel)
     -- =========================================================================
     do
         local p = pageScale
         local Y = -8
 
-        -- Big status indicator
+        -- Status indicator
         local statusDot = p:CreateTexture(nil, "ARTWORK")
         statusDot:SetSize(10, 10)
         statusDot:SetPoint("TOPLEFT", p, "TOPLEFT", PAD + 4, Y - 4)
-        statusDot:SetColorTexture(T.bad[1], T.bad[2], T.bad[3], 1)
+        statusDot:SetColorTexture(T.warn[1], T.warn[2], T.warn[3], 1)
 
         local statusFS = FS(p, 13, "OUTLINE")
         statusFS:SetPoint("LEFT", statusDot, "RIGHT", 6, 1)
@@ -301,73 +301,38 @@ function PPUI:CreateGUI()
         win._statusFS  = statusFS
         Y = Y - 22
 
-        win._vPhysRes = RowValue(p, Y); RowLabel(p, "Physical Resolution",    Y); Y = Y - ROW_H
-        win._vAspect  = RowValue(p, Y); RowLabel(p, "Aspect Ratio",            Y); Y = Y - ROW_H
-        win._vScale   = RowValue(p, Y); RowLabel(p, "UIParent Scale",          Y); Y = Y - ROW_H
-        win._vTarget  = RowValue(p, Y); RowLabel(p, "Pixel-Perfect Target",    Y); Y = Y - ROW_H
-        win._vPixelU  = RowValue(p, Y); RowLabel(p, "1 Pixel (region units)",  Y); Y = Y - ROW_H
+        SectionTitle(p, "Current Resolution", Y);  Y = Y - 20
+        win._vPhysRes = RowValue(p, Y); RowLabel(p, "Physical Resolution", Y); Y = Y - ROW_H
+        win._vAspect  = RowValue(p, Y); RowLabel(p, "Aspect Ratio",         Y); Y = Y - ROW_H
+        win._vScale   = RowValue(p, Y); RowLabel(p, "UIParent Scale",       Y); Y = Y - ROW_H
+        win._vPxPerU  = RowValue(p, Y); RowLabel(p, "Pixels per unit",      Y); Y = Y - ROW_H
+        win._vPixelU  = RowValue(p, Y); RowLabel(p, "1 Pixel (units)",      Y); Y = Y - ROW_H
+        win._vDrift   = RowValue(p, Y); RowLabel(p, "Sub-pixel drift",      Y); Y = Y - ROW_H
 
         Y = Y - 4;  HLine(p, Y);  Y = Y - GAP
-        SectionTitle(p, "Scale Controls", Y);  Y = Y - 20
+        SectionTitle(p, "Pixel-Perfect Reference Scales", Y);  Y = Y - 20
 
-        local cbEnable = MakeCheckbox(p, "Enable Pixel Perfect Mode", PAD + 2, Y)
-        cbEnable:SetScript("OnClick", function(self)
-            PPUI.db.enabled = self:GetChecked()
-            win:Refresh()
-        end)
-        win._cbEnable = cbEnable;  Y = Y - 24
+        -- Static reference table rows (N=1, 2, 3)
+        win._vRefRows = {}
+        for n = 1, 3 do
+            local rv = RowValue(p, Y)
+            RowLabel(p, "N=" .. n .. " scale", Y)
+            win._vRefRows[n] = rv
+            Y = Y - ROW_H
+        end
 
-        local cbAuto = MakeCheckbox(p, "Apply automatically on each login", PAD + 2, Y)
-        cbAuto:SetScript("OnClick", function(self) PPUI.db.autoApply = self:GetChecked() end)
-        win._cbAuto = cbAuto;  Y = Y - 24
-
-        local cbManual = MakeCheckbox(p, "Use a custom scale instead of optimal", PAD + 2, Y)
-        cbManual:SetScript("OnClick", function(self)
-            PPUI.db.useManualScale = self:GetChecked()
-            win._slider:SetSliderEnabled(self:GetChecked())
-            win:Refresh()
-        end)
-        win._cbManual = cbManual;  Y = Y - 28
-
-        RowLabel(p, "Manual Scale:", Y)
-        win._sliderValFS = RowValue(p, Y);  Y = Y - ROW_H
-
-        local slider = MakeSlider(p)
-        slider:SetPoint("TOPLEFT",  p, "TOPLEFT",  PAD + 2, Y)
-        slider:SetPoint("TOPRIGHT", p, "TOPRIGHT", -(PAD + 2), Y)
-        slider:SetScript("OnValueChanged", function(self, val)
-            PPUI.db.manualScale = val
-            win._sliderValFS:SetText(string.format("|c%s%.4f|r", C.white, val))
-        end)
-        win._slider = slider;  Y = Y - 22
-
-        win._optimalHintFS = FS(p, 10)
-        win._optimalHintFS:SetPoint("TOPLEFT", p, "TOPLEFT", PAD + 4, Y)
-        win._optimalHintFS:SetTextColor(T.dim[1], T.dim[2], T.dim[3])
+        local refNoteFS = FS(p, 10)
+        refNoteFS:SetPoint("TOPLEFT", p, "TOPLEFT", PAD + 4, Y)
+        refNoteFS:SetTextColor(T.dim[1], T.dim[2], T.dim[3])
+        refNoteFS:SetText(
+            "N=1: thinnest borders, may be too small.  N=2: 2× density, borders look thicker.")
         Y = Y - 16
 
-        -- Button row
-        local btnApply = MakeButton(p, "Apply Now", 108, 22)
-        btnApply:SetPoint("TOPLEFT", p, "TOPLEFT", PAD + 2, Y)
-        btnApply:SetScript("OnClick", function()
-            local scale = PPUI.db.useManualScale and PPUI.db.manualScale
-                          or PPUI:GetPixelPerfectScale()
-            PPUI:ApplyScale(scale)
-            PPUI:Log(string.format("Scale %.6f applied.", scale))
-            win:Refresh()
-        end)
-
-        local btnOptimal = MakeButton(p, "Set Optimal", 108, 22)
-        btnOptimal:SetPoint("LEFT", btnApply, "RIGHT", 6, 0)
-        btnOptimal:SetScript("OnClick", function()
-            PPUI.db.useManualScale = false
-            win._cbManual:SetChecked(false)
-            win._slider:SetSliderEnabled(false)
-            local scale = PPUI:GetPixelPerfectScale()
-            PPUI:ApplyScale(scale)
-            win:Refresh()
-            PPUI:Log(string.format("Optimal scale %.6f applied.", scale))
-        end)
+        local refNote2FS = FS(p, 10)
+        refNote2FS:SetPoint("TOPLEFT", p, "TOPLEFT", PAD + 4, Y)
+        refNote2FS:SetTextColor(T.dim[1], T.dim[2], T.dim[3])
+        refNote2FS:SetText(
+            "Set your UIScale in ElvUI / System > Display.  Use the Inspector and Guides to align frames.")
     end
 
     -- =========================================================================
@@ -588,25 +553,22 @@ function PPUI:CreateGUI()
 
         local physW, physH = PPUI:GetPhysicalSize()
         local cur     = UIParent:GetScale()
-        local target  = PPUI:GetPixelPerfectScale()
         local N       = PPUI:GetPixelMultiplier()
-        local perfect = PPUI:IsPixelPerfect()
         local pxPerU  = PPUI:RegionUnitsToPixels(1)
         local pixelU  = PPUI:PixelsToRegionUnits(1)
-        local frac    = pxPerU - math.floor(pxPerU + 0.00001)
 
         -- ── Status indicator ───────────────────────────────────────────────
+        local frac    = pxPerU - math.floor(pxPerU + 0.00001)
+        local perfect = frac < 0.0001
         if perfect then
             self._statusDot:SetColorTexture(T.good[1], T.good[2], T.good[3], 1)
-            local density = N == 1 and "1px/unit"
-                or string.format("%dpx/unit  (×%d density)", N, N)
-            self._statusFS:SetText(
-                string.format("|cff33dd55● PIXEL PERFECT  |r|cff888888%s|r", density))
+            self._statusFS:SetText(string.format(
+                "|cff33dd55● Pixel Perfect  |r|cff888888N=%d  (%dpx/unit)|r", N, N))
         else
             self._statusDot:SetColorTexture(T.warn[1], T.warn[2], T.warn[3], 1)
             self._statusFS:SetText(string.format(
-                "|cffff9933● Scale mismatch  |r|cff888888current %.4f → target %.4f|r",
-                cur, target))
+                "|cffff9933● Sub-pixel drift  |r|cff888888%.4f  (%.5f px frac)|r",
+                cur, frac))
         end
 
         -- ── Scale tab values ──────────────────────────────────────────────
@@ -614,27 +576,39 @@ function PPUI:CreateGUI()
         self._vAspect:SetText(string.format("|c%s%.4f : 1|r", C.white, physW / physH))
         local scaleCol = perfect and C.good or C.warn
         self._vScale:SetText(string.format("|c%s%.6f|r", scaleCol, cur))
-        self._vTarget:SetText(string.format("|c%s%.6f|r%s",
-            C.white, target,
-            target < 0.64 and "  |cffff9933(bypass active)|r" or ""))
-        self._vPixelU:SetText(string.format("|c%s%.6f|r", C.white, pixelU))
 
-        -- ── Scale controls ────────────────────────────────────────────────
-        self._cbEnable:SetChecked(PPUI.db.enabled)
-        self._cbAuto:SetChecked(PPUI.db.autoApply)
-        self._cbManual:SetChecked(PPUI.db.useManualScale)
+        local fracCol = frac < 0.0001 and C.good or C.warn
+        self._vPxPerU:SetText(string.format(
+            "|c%s%.6f|r  |c%s(frac %.5f)|r", C.white, pxPerU, fracCol, frac))
+        self._vPixelU:SetText(string.format("|c%s%.6f|r units", C.white, pixelU))
 
-        local sv = math.max(0.20, math.min(1.20, PPUI.db.manualScale or target))
-        self._slider:SetValue(sv)
-        self._slider:SetSliderEnabled(PPUI.db.useManualScale)
-        self._sliderValFS:SetText(string.format("|c%s%.4f|r", C.white, sv))
-        self._optimalHintFS:SetText(string.format(
-            "Optimal: |c%s%.6f|r  (N=%d, %dpx/unit, ≈%dpx screen)",
-            C.accent, target, N, N, math.floor(768 / target + 0.5)))
+        if frac < 0.0001 then
+            self._vDrift:SetText("|cff33dd55None — crisp pixel boundaries|r")
+        else
+            self._vDrift:SetText(string.format(
+                "|cffff9933%.5f px  — source of 1px misalignment|r", frac))
+        end
+
+        -- ── Pixel-perfect reference table ─────────────────────────────────
+        if self._vRefRows then
+            local _, physH2 = PPUI:GetPhysicalSize()
+            for n = 1, 3 do
+                local s     = n * 768 / physH2
+                local isCur = math.abs(cur - s) < 0.000005
+                local col   = isCur and C.good or C.white
+                local note  = isCur and "  ← current" or ""
+                local size  = s < 0.45 and "  |c" .. C.warn .. "(very small)|r"
+                           or s > 1.10 and "  |c" .. C.warn .. "(very large)|r"
+                           or ""
+                self._vRefRows[n]:SetText(string.format(
+                    "|c%s%.6f|r%s%s", col, s, note, size))
+            end
+        end
 
         -- ── Diagnostics tab values ────────────────────────────────────────
         local cvarV = tonumber(GetCVarSafe("uiScale")) or 0
         local cvarU = GetCVarSafe("useUiScale") or "0"
+        local frac  = pxPerU - math.floor(pxPerU + 0.00001)
 
         self._vCvarScale:SetText(string.format("|c%s%.6f|r", C.white, cvarV))
         self._vCvarUse:SetText(cvarU == "1"
@@ -658,6 +632,7 @@ function PPUI:CreateGUI()
                 "|cffff9933%.5f px — source of 1px misalignment|r", frac))
         end
 
+        local target = PPUI:GetPixelPerfectScale()
         self._vBypass:SetText(target < 0.64
             and string.format("|cffff9933Yes (target %.4f < CVar floor 0.64)|r", target)
             or  "|cff33dd55No — CVar range sufficient|r")
